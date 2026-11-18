@@ -29,7 +29,7 @@
     <input id="quickInput" placeholder="Add a task…" aria-label="Quick add task" enterkeyhint="done">
     <button type="submit" class="primary">Add</button>
   </form>
-  <p id="quickHint" class="hint">Try “Pay rent <code>tomorrow</code> <code>9am</code> <code>!3</code>” — day, time and importance 1–4 at the end.</p>
+  <p id="quickHint" class="hint">Try “Dentist <code>friday 3pm</code> <code>!3</code>” — a date or time in the title becomes the <b>planned</b> date. Add <code>by</code> or <code>due</code> (“Report <code>by monday</code>”) for a deadline. <code>!1</code>–<code>!4</code> sets importance.</p>
   <section id="list"></section>
 </main>
 
@@ -45,6 +45,10 @@
     <h2 id="dlgTitle">New task</h2>
     <label>Title <input name="title" required autocomplete="off" enterkeyhint="done"></label>
     <label>Notes <textarea name="notes" rows="3"></textarea></label>
+    <div class="row">
+      <label>Planned date <input type="date" name="plannedDate"></label>
+      <label>Planned time <input type="time" name="plannedTime"></label>
+    </div>
     <div class="row">
       <label>Due <input type="datetime-local" name="due"></label>
       <label>Importance
@@ -124,7 +128,7 @@
 <dialog id="reDlg">
   <form method="dialog" id="reForm">
     <h2>Reschedule</h2>
-    <label>New due <input type="datetime-local" name="due" required></label>
+    <label id="reLabel">New due <input type="datetime-local" name="due" required></label>
     <div class="actions">
       <span class="spacer"></span>
       <button type="button" id="reCancel">Cancel</button>
@@ -133,6 +137,7 @@
   </form>
 </dialog>
 
+<script src="parse.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

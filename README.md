@@ -6,6 +6,15 @@ quick actions, and a log of every interaction for a future agent to learn from.
 This repository currently contains the **web app** and the **server**. Telegram, voice
 notes, phone push notifications and calendar sync are not built yet (see [Roadmap](#roadmap)).
 
+## Planned date vs. due date
+
+A task has two optional dates. **Planned** is when it happens ("Dentist friday 3pm"); **due** is the
+deadline and the only one that triggers reminders ("Report by monday"). Either, both or neither can be set.
+The app reads the title as you add the task (`web/parse.js`): a date/time becomes the planned date, a date/time
+after `by`, `due`, `before` or `until` becomes the due date, and the phrase is removed from the title.
+Supported: today/tomorrow/tonight, weekdays (`next friday`), `nov 25`, `25 nov`, `2026-12-01`, `in 2 hours`,
+`5pm`, `17:30`, `noon`. A date without a time is planned for the whole day.
+
 ## Quick start
 
 ```bash
@@ -215,13 +224,13 @@ All routes are under `/api`, take and return JSON, and need the session cookie e
 | `POST /logout`                     |                                                   |
 | `GET /health`                      |                                                   |
 | `GET /state`                       | returns `{ tasks, events (latest 500), eventCount }` |
-| `POST /tasks`                      | `{ title, notes?, due?, importance?, recur? }`    |
+| `POST /tasks`                      | `{ title, notes?, planned?, plannedTime?, due?, importance?, recur? }` |
 | `PATCH /tasks/:id`                 | any of the fields above                           |
 | `DELETE /tasks/:id`                |                                                   |
 | `POST /tasks/:id/complete`         |                                                   |
 | `POST /tasks/:id/reopen`           |                                                   |
 | `POST /tasks/:id/snooze`           | `{ kind: "1h" \| "tomorrow" }`                    |
-| `POST /tasks/:id/reschedule`       | `{ due }`                                         |
+| `POST /tasks/:id/reschedule`       | `{ due }` or `{ planned, plannedTime? }`          |
 | `POST /undo/:token`                |                                                   |
 | `GET /events.json`                 | full event log as a download                      |
 | `DELETE /events`                   | clears the log                                    |

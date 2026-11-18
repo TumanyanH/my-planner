@@ -177,3 +177,41 @@ test('users: stable by Google id, email matched case-insensitively, first user a
   assert.equal(s.getUser(alice.id).email, 'alice@example.com');
   assert.equal(s.getUser('nobody'), null);
 });
+
+test('planned and due are independent and both optional', () => {
+  const s = fresh();
+  s.create({ title: 'Only planned', planned: hours(30), plannedTime: true }, 'web');
+  s.create({ title: 'Only due', due: hours(30) }, 'web');
+  s.create({ title: 'Both', planned: hours(30), due: hours(60) }, 'web');
+  s.create({ title: 'Neither' }, 'web');
+  const t = Object.fromEntries(s.state().tasks.map(x => [x.title, x]));
+  assert.ok(t['Only planned'].planned && !t['Only planned'].due && t['Only planned'].plannedTime);
+  assert.ok(!t['Only due'].planned && t['Only due'].due && !t['Only due'].plannedTime);
+  assert.ok(t.Both.planned && t.Both.due);
+  assert.ok(!t.Neither.planned && !t.Neither.due);
+  assert.throws(() => s.create({ title: 'x', planned: 'nonsense' }, 'web'), /planned/);
+  s.update(t.Both.id, { planned: null }, 'web');
+  assert.equal(s.state().tasks.find(x => x.id === t.Both.id).planned, null);
+  assert.ok(s.state().tasks.find(x => x.id === t.Both.id).due, 'due is untouched');
+});
+
+test('a planned-only task gets no reminder, and reschedule can move the planned date', () => {
+  const raw = openStore(':memory:'), s = bind(raw, user(raw, 'bob').id);
+  s.create({ title: 'Dentist', planned: hours(-1), plannedTime: true }, 'web');
+  assert.equal(raw.collectDue().length, 0);
+  const id = only(s).id, when = hours(5);
+  s.reschedule(id, when, 'web', 'planned', false);
+  assert.equal(only(s).planned, when);
+  assert.equal(only(s).due, null);
+  assert.equal(only(s).plannedTime, false);
+});
+
+test('repeating a planned-only task moves its planned date', () => {
+  const s = fresh();
+  s.create({ title: 'Class', planned: hours(-50), plannedTime: true, recur: { type: 'daily', every: 1 } }, 'web');
+  const first = only(s);
+  s.complete(first.id, 'web');
+  const next = s.state().tasks.find(t => t.id !== first.id);
+  assert.ok(new Date(next.planned) > new Date());
+  assert.equal(next.due, null);
+});
