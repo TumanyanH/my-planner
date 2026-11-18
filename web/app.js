@@ -4,7 +4,18 @@
 'use strict';
 
 let state = { tasks: [], events: [], eventCount: 0 };
-let view = 'today';
+// Device-local preferences (General settings).
+const SETTINGS_KEY = 'planner.settings';
+function loadSettings() {
+  let v = {};
+  try { v = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch (e) {}
+  return {
+    startView: ['dashboard', 'today', 'upcoming', 'all'].includes(v.startView) ? v.startView : 'today',
+    importance: [1, 2, 3, 4].includes(+v.importance) ? +v.importance : 2
+  };
+}
+let settings = loadSettings();
+let view = settings.startView;
 let query = '';
 let editingId = null;
 let reschedId = null;
@@ -28,7 +39,7 @@ async function api(method, path, body) {
     });
   } catch (e) { throw new ApiError(0, 'Can’t reach the server'); }
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && path !== '/login') { showLogin(); throw new ApiError(401, 'Sign in required'); }
+  if (res.status === 401 && !path.startsWith('/login')) { showLogin(); throw new ApiError(401, 'Sign in required'); }
   if (!res.ok) throw new ApiError(res.status, data.error || 'Something went wrong');
   return data;
 }
@@ -59,10 +70,43 @@ async function refresh() {
 }
 
 // ---------- sign in ----------
-function showLogin() {
+let loginCfg;
+async function showLogin() {
   const d = $('#loginDlg');
-  if (!d.open) { $('#loginErr').hidden = true; d.showModal(); $('#loginForm').password.focus(); }
+  if (d.open) return;
+  $('#loginErr').hidden = true;
+  d.showModal();
+  try {
+    loginCfg = loginCfg || await api('GET', '/config');
+  } catch (e) { return loginError(e.message); }
+  $('#loginForm').hidden = !loginCfg.password;
+  if (loginCfg.password) $('#loginForm').password.focus();
+  if (loginCfg.google) setupGoogle(loginCfg.google);
 }
+function loginError(msg) { $('#loginErr').textContent = msg; $('#loginErr').hidden = false; }
+
+let gsiLoading;
+function setupGoogle(clientId) {
+  gsiLoading = gsiLoading || new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://accounts.google.com/gsi/client'; s.async = true;
+    s.onload = resolve; s.onerror = () => { gsiLoading = null; reject(new Error('Could not load Google sign-in')); };
+    document.head.appendChild(s);
+  });
+  gsiLoading.then(() => {
+    google.accounts.id.initialize({
+      client_id: clientId,
+      callback: async (r) => {
+        try { await api('POST', '/login/google', { credential: r.credential }); $('#loginDlg').close(); boot(); }
+        catch (err) { loginError(err.message); }
+      }
+    });
+    const box = $('#googleBtn');
+    box.replaceChildren();
+    google.accounts.id.renderButton(box, { theme: 'outline', size: 'large', shape: 'pill', text: 'signin_with', width: 260 });
+  }).catch((e) => loginError(e.message));
+}
+
 $('#loginDlg').addEventListener('cancel', (e) => e.preventDefault());
 $('#loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -71,7 +115,7 @@ $('#loginForm').addEventListener('submit', async (e) => {
     await api('POST', '/login', { password: f.password.value });
     f.password.value = ''; $('#loginDlg').close();
     boot();
-  } catch (err) { $('#loginErr').textContent = err.message; $('#loginErr').hidden = false; }
+  } catch (err) { loginError(err.message); }
 });
 
 // Tasks made before there was a server live in this browser's storage; move them over once.
@@ -87,8 +131,40 @@ async function importLocal() {
   } catch (e) { fail(e); }
 }
 async function boot() {
-  if (await refresh()) importLocal();
+  if (await refresh()) { importLocal(); loadProfile(); }
 }
+
+// ---------- profile ----------
+let me = null;
+async function loadProfile() {
+  try { me = await api('GET', '/me'); } catch (e) { return; }
+  const b = $('#profileBtn');
+  b.textContent = (me.email || 'P')[0].toUpperCase();
+  b.title = me.email || 'Profile';
+}
+async function signOut() {
+  try { await api('POST', '/logout'); } catch (err) { return fail(err); }
+  $('#profileDlg').close(); me = null;
+  state = { tasks: [], events: [], eventCount: 0 }; render(); showLogin();
+}
+$('#profileBtn').onclick = () => {
+  $('#profileEmail').value = me?.email || (me ? 'Signed in with a password' : '');
+  $('#profileDlg').showModal();
+};
+$('#profileClose').onclick = () => $('#profileDlg').close();
+$('#signOutBtn').onclick = signOut;
+$('#settingsBtn').onclick = () => {
+  const f = $('#settingsForm');
+  f.startView.value = settings.startView; f.importance.value = settings.importance;
+  $('#profileDlg').close(); $('#settingsDlg').showModal();
+};
+$('#settingsCancel').onclick = () => $('#settingsDlg').close();
+$('#settingsForm').addEventListener('submit', () => {
+  const f = $('#settingsForm');
+  settings = { startView: f.startView.value, importance: +f.importance.value };
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+  toast('Settings saved');
+});
 
 // ---------- dates ----------
 const pad = (n) => String(n).padStart(2, '0');
@@ -119,7 +195,7 @@ const IMP = { 1: 'Low', 2: 'Normal', 3: 'High', 4: 'Critical' };
 // Trailing tokens only: "today"/"tomorrow", a time ("17:30", "9am"), "!1".."!4".
 function parseQuick(text) {
   const words = text.trim().split(/\s+/);
-  let importance = 2, day = null, hm = null;
+  let importance = settings.importance, day = null, hm = null;
   while (words.length > 1) {
     const w = words[words.length - 1].toLowerCase(); let m;
     if ((m = /^!([1-4])$/.exec(w))) importance = +m[1];
@@ -208,7 +284,7 @@ function logHTML() {
   }).join('');
   const n = state.eventCount;
   return `<div class="logbar"><span>${n} event${n === 1 ? '' : 's'}${n > state.events.length ? ` (latest ${state.events.length} shown)` : ''}</span>
-    <span><button class="small" data-a="export">Export</button><button class="small" data-a="clearlog">Clear</button><button class="small" data-a="logout">Sign out</button></span></div>` +
+    <span><button class="small" data-a="export">Export</button><button class="small" data-a="clearlog">Clear</button></span></div>` +
     (rows ? `<div class="log">${rows}</div>` : empty('No activity yet', 'Everything you do with a task is recorded here.'));
 }
 
@@ -278,11 +354,6 @@ document.addEventListener('click', async (e) => {
   if (a === 'clearlog') {
     if (state.eventCount && confirm('Clear the whole activity log? This is what the agent learns from, and it cannot be undone.'))
       act('Activity log cleared', 'DELETE', '/events');
-    return;
-  }
-  if (a === 'logout') {
-    try { await api('POST', '/logout'); } catch (err) { return fail(err); }
-    state = { tasks: [], events: [], eventCount: 0 }; render(); showLogin();
     return;
   }
 

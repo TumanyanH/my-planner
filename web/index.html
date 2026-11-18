@@ -18,6 +18,7 @@
 <header class="top">
   <div class="bar">
     <h1>Planner</h1>
+    <button id="profileBtn" class="round" aria-label="Profile" title="Profile">•</button>
     <button id="newBtn" class="primary round" aria-label="New task" title="New task">+</button>
   </div>
   <input id="search" type="search" placeholder="Search" aria-label="Search tasks" autocomplete="off" enterkeyhint="search">
@@ -76,11 +77,50 @@
   </form>
 </dialog>
 
+<dialog id="profileDlg">
+  <h2>Profile</h2>
+  <label>Email <input id="profileEmail" type="text" value="" disabled></label>
+  <div class="actions stack">
+    <button type="button" id="settingsBtn">Edit general settings</button>
+    <button type="button" id="signOutBtn" class="destructive">Sign out</button>
+    <button type="button" id="profileClose">Close</button>
+  </div>
+</dialog>
+
+<dialog id="settingsDlg">
+  <form method="dialog" id="settingsForm">
+    <h2>General settings</h2>
+    <label>Open on
+      <select name="startView">
+        <option value="dashboard">Dashboard</option>
+        <option value="today">Today</option>
+        <option value="upcoming">Upcoming</option>
+        <option value="all">All</option>
+      </select>
+    </label>
+    <label>Default importance for quick add
+      <select name="importance">
+        <option value="1">1 · Low</option>
+        <option value="2">2 · Normal</option>
+        <option value="3">3 · High</option>
+        <option value="4">4 · Critical</option>
+      </select>
+    </label>
+    <p class="hint">Saved on this device.</p>
+    <div class="actions">
+      <span class="spacer"></span>
+      <button type="button" id="settingsCancel">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="loginDlg">
-  <form id="loginForm">
-    <h2>Sign in</h2>
+  <h2>Sign in</h2>
+  <div id="googleBtn" style="display:flex;justify-content:center;margin:4px 0 8px"></div>
+  <p id="loginErr" class="error" hidden></p>
+  <form id="loginForm" hidden>
     <label>Password <input type="password" name="password" required autocomplete="current-password" enterkeyhint="go"></label>
-    <p id="loginErr" class="error" hidden></p>
     <div class="actions">
       <span class="spacer"></span>
       <button type="submit" class="primary">Sign in</button>

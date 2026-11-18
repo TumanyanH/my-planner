@@ -9,16 +9,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# First run: create .env with a random password.
+# First run: create .env from the template.
 if [ ! -f .env ]; then
-  pass="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | cut -c1-20)"
   tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
-  sed -e "s|^PLANNER_PASSWORD=.*|PLANNER_PASSWORD=${pass}|" -e "s|^TZ=.*|TZ=${tz:-UTC}|" .env.example > .env
+  sed -e "s|^TZ=.*|TZ=${tz:-UTC}|" .env.example > .env
   chmod 600 .env
   echo "Created .env"
-  echo "  Password: ${pass}"
   echo "  Timezone: ${tz:-UTC}   (edit TZ in .env if this is not where you live)"
+  echo "  Edit .env now: set GOOGLE_CLIENT_ID and ALLOWED_EMAIL (see README.md), then run again."
   echo
+  exit 0
 fi
 
 mkdir -p data

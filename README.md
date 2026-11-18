@@ -12,8 +12,10 @@ notes, phone push notifications and calendar sync are not built yet (see [Roadma
 ./run.sh
 ```
 
-The first run creates `.env` with a random password and prints it. Then open
-<http://localhost:8080> and sign in. Requires Node.js 24 or newer; nothing to install.
+The first run creates `.env` and stops so you can fill it in: set `GOOGLE_CLIENT_ID` and
+`ALLOWED_EMAIL` (see [Google sign-in](#google-sign-in)), or `PLANNER_PASSWORD` for a plain
+password. Run it again, open <http://localhost:8080> and sign in. Requires Node.js 24 or
+newer; nothing to install.
 
 | Command           | What it does                                                        |
 | ----------------- | ------------------------------------------------------------------- |
@@ -28,7 +30,9 @@ The first run creates `.env` with a random password and prints it. Then open
 
 | Variable           | Default     | Meaning                                                                                 |
 | ------------------ | ----------- | --------------------------------------------------------------------------------------- |
-| `PLANNER_PASSWORD` | (generated) | Password for the web app, 8+ characters. Changing it signs every device out.            |
+| `GOOGLE_CLIENT_ID` | empty       | OAuth client ID for Google sign-in (the default sign-in method).                         |
+| `ALLOWED_EMAIL`    | empty       | The one Google account allowed in. Required with `GOOGLE_CLIENT_ID`.                    |
+| `PLANNER_PASSWORD` | empty       | Optional password sign-in, 8+ characters. Leave empty to turn it off. Changing it signs every device out. |
 | `TZ`               | system zone | Your timezone as an IANA name, e.g. `Europe/Berlin`. See the note below.                |
 | `PORT`             | `8080`      | Port the app listens on.                                                                |
 | `BIND`             | `127.0.0.1` | Docker only: address the port is published on.                                          |
@@ -39,6 +43,21 @@ The first run creates `.env` with a random password and prints it. Then open
 **Set `TZ` to where you live, not where the server is.** "Tomorrow" and repeating tasks
 are calculated on the server in this timezone. A VPS is usually on UTC, so a fresh `.env`
 created there will say `TZ=UTC` until you change it.
+
+## Google sign-in
+
+1. In the [Google Cloud console](https://console.cloud.google.com/apis/credentials), create a
+   project, configure the OAuth consent screen (External; add your own account as a test
+   user), then **Create credentials → OAuth client ID → Web application**.
+2. Under **Authorized JavaScript origins** add the exact address you open the app at, for
+   example `https://92-5-32-249.sslip.io` (and `http://localhost:8080` for local use).
+   No redirect URI is needed.
+3. Put the client ID in `.env` as `GOOGLE_CLIENT_ID` and your Google address as
+   `ALLOWED_EMAIL`, then restart (`./run.sh https`).
+
+The server checks Google's signature on the sign-in token, that it was issued for your client
+ID, that the email is verified, and that it equals `ALLOWED_EMAIL`. Any other Google account
+is refused. If `PLANNER_PASSWORD` is also set, a password form is shown as well.
 
 ## Deploying on an Oracle Cloud VPS
 
@@ -59,7 +78,7 @@ iPhone home-screen app needs a secure origin. The `https` mode handles certifica
    ```bash
    ./run.sh test          # optional, needs Node; skip if Node is not installed
    cp .env.example .env   # or let run.sh generate it, then edit
-   nano .env              # set PLANNER_PASSWORD, TZ and DOMAIN
+   nano .env              # set GOOGLE_CLIENT_ID, ALLOWED_EMAIL, TZ and DOMAIN
    ./run.sh https
    ```
 5. Open `https://your-domain` on the iPhone in Safari, sign in, then Share → **Add to Home
@@ -149,8 +168,9 @@ Design decisions and the reasoning behind them:
   delivered to. There are no channels yet (the event says `channels: none`), and the web
   app shows the task as overdue. A reminder left untouched for an hour logs
   `reminder_ignored`. Telegram and push plug in as "notifiers" in `reminders.js`.
-- **One password, signed cookie.** Sign-in sets an HTTP-only cookie signed with a key
-  derived from the password. Ten wrong passwords lock sign-in for 15 minutes. Changing
+- **One user, signed cookie.** Google sign-in (or the optional password) sets an HTTP-only
+  cookie signed with a random secret kept in `data/session.key`. Ten wrong passwords lock
+  password sign-in for 15 minutes. Changing
   requests must be JSON and the cookie is `SameSite=Lax`, which blocks cross-site forgery.
 - **Undo is server-side.** Each action returns a one-time token that restores the rows it
   touched. Tokens live in memory, so they do not survive a restart. The original events
@@ -178,11 +198,13 @@ at that moment.
 ### API
 
 All routes are under `/api`, take and return JSON, and need the session cookie except
-`login` and `health`. Routes that change something return `{ state, undo }`.
+`login`, `login/google`, `config` and `health`. Routes that change something return `{ state, undo }`.
 
 | Method & path                      | Body                                              |
 | ---------------------------------- | ------------------------------------------------- |
-| `POST /login`                      | `{ password }`                                    |
+| `GET /config`                      | returns `{ google, password }` (no sign-in needed) |
+| `POST /login/google`               | `{ credential }` (Google ID token)                |
+| `POST /login`                      | `{ password }` (only if `PLANNER_PASSWORD` is set) |
 | `POST /logout`                     |                                                   |
 | `GET /health`                      |                                                   |
 | `GET /state`                       | returns `{ tasks, events (latest 500), eventCount }` |
