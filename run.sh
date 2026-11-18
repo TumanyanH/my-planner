@@ -16,7 +16,7 @@ if [ ! -f .env ]; then
   chmod 600 .env
   echo "Created .env"
   echo "  Timezone: ${tz:-UTC}   (edit TZ in .env if this is not where you live)"
-  echo "  Edit .env now: set GOOGLE_CLIENT_ID and ALLOWED_EMAIL (see README.md), then run again."
+  echo "  Edit .env now: set GOOGLE_CLIENT_ID and ALLOWED_EMAILS (see README.md), then run again."
   echo
   exit 0
 fi

@@ -79,9 +79,7 @@ async function showLogin() {
   try {
     loginCfg = loginCfg || await api('GET', '/config');
   } catch (e) { return loginError(e.message); }
-  $('#loginForm').hidden = !loginCfg.password;
-  if (loginCfg.password) $('#loginForm').password.focus();
-  if (loginCfg.google) setupGoogle(loginCfg.google);
+  setupGoogle(loginCfg.google);
 }
 function loginError(msg) { $('#loginErr').textContent = msg; $('#loginErr').hidden = false; }
 
@@ -108,15 +106,6 @@ function setupGoogle(clientId) {
 }
 
 $('#loginDlg').addEventListener('cancel', (e) => e.preventDefault());
-$('#loginForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const f = $('#loginForm');
-  try {
-    await api('POST', '/login', { password: f.password.value });
-    f.password.value = ''; $('#loginDlg').close();
-    boot();
-  } catch (err) { loginError(err.message); }
-});
 
 // Tasks made before there was a server live in this browser's storage; move them over once.
 async function importLocal() {
@@ -148,7 +137,7 @@ async function signOut() {
   state = { tasks: [], events: [], eventCount: 0 }; render(); showLogin();
 }
 $('#profileBtn').onclick = () => {
-  $('#profileEmail').value = me?.email || (me ? 'Signed in with a password' : '');
+  $('#profileEmail').value = me?.email || '';
   $('#profileDlg').showModal();
 };
 $('#profileClose').onclick = () => $('#profileDlg').close();

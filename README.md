@@ -13,8 +13,7 @@ notes, phone push notifications and calendar sync are not built yet (see [Roadma
 ```
 
 The first run creates `.env` and stops so you can fill it in: set `GOOGLE_CLIENT_ID` and
-`ALLOWED_EMAIL` (see [Google sign-in](#google-sign-in)), or `PLANNER_PASSWORD` for a plain
-password. Run it again, open <http://localhost:8080> and sign in. Requires Node.js 24 or
+`ALLOWED_EMAILS` (see [Google sign-in](#google-sign-in)). Run it again, open <http://localhost:8080> and sign in. Requires Node.js 24 or
 newer; nothing to install.
 
 | Command           | What it does                                                        |
@@ -31,8 +30,7 @@ newer; nothing to install.
 | Variable           | Default     | Meaning                                                                                 |
 | ------------------ | ----------- | --------------------------------------------------------------------------------------- |
 | `GOOGLE_CLIENT_ID` | empty       | OAuth client ID for Google sign-in (the default sign-in method).                         |
-| `ALLOWED_EMAIL`    | empty       | The one Google account allowed in. Required with `GOOGLE_CLIENT_ID`.                    |
-| `PLANNER_PASSWORD` | empty       | Optional password sign-in, 8+ characters. Leave empty to turn it off. Changing it signs every device out. |
+| `ALLOWED_EMAILS`   | empty       | Google accounts allowed in, comma separated. Required with `GOOGLE_CLIENT_ID`. (`ALLOWED_EMAIL` still works.) |
 | `TZ`               | system zone | Your timezone as an IANA name, e.g. `Europe/Berlin`. See the note below.                |
 | `PORT`             | `8080`      | Port the app listens on.                                                                |
 | `BIND`             | `127.0.0.1` | Docker only: address the port is published on.                                          |
@@ -53,15 +51,26 @@ created there will say `TZ=UTC` until you change it.
    example `https://92-5-32-249.sslip.io` (and `http://localhost:8080` for local use).
    No redirect URI is needed.
 3. Put the client ID in `.env` as `GOOGLE_CLIENT_ID` and your Google address as
-   `ALLOWED_EMAIL`, then restart (`./run.sh https`).
+   `ALLOWED_EMAILS`, then restart (`./run.sh https`).
 
 The server checks Google's signature on the sign-in token, that it was issued for your client
-ID, that the email is verified, and that it equals `ALLOWED_EMAIL`. Any other Google account
-is refused. If `PLANNER_PASSWORD` is also set, a password form is shown as well.
+ID, that the email is verified, and that it is in `ALLOWED_EMAILS`. Any other Google account
+is refused. There is no password sign-in.
+
+### Accounts
+
+Every task and every activity-log event belongs to one account (`user_id`), and the server
+filters every query by the signed-in account, so accounts never see or change each other's
+data. To add a person, put their Google address in `ALLOWED_EMAILS` and restart; their
+account is created on first sign-in. Removing an address locks them out on their next
+request. Their data stays in the database.
+
+Upgrading from a single-user database: on first start the tasks and log that already exist
+are adopted by whichever account signs in first, so sign in with your own account first.
 
 ## Deploying on an Oracle Cloud VPS
 
-HTTPS matters here: the password and session cookie travel with every request, and an
+HTTPS matters here: the session cookie travels with every request, and an
 iPhone home-screen app needs a secure origin. The `https` mode handles certificates for you.
 
 1. **Point a domain at the VPS.** Any domain or free subdomain (for example DuckDNS) with
@@ -78,7 +87,7 @@ iPhone home-screen app needs a secure origin. The `https` mode handles certifica
    ```bash
    ./run.sh test          # optional, needs Node; skip if Node is not installed
    cp .env.example .env   # or let run.sh generate it, then edit
-   nano .env              # set GOOGLE_CLIENT_ID, ALLOWED_EMAIL, TZ and DOMAIN
+   nano .env              # set GOOGLE_CLIENT_ID, ALLOWED_EMAILS, TZ and DOMAIN
    ./run.sh https
    ```
 5. Open `https://your-domain` on the iPhone in Safari, sign in, then Share → **Add to Home
@@ -168,9 +177,8 @@ Design decisions and the reasoning behind them:
   delivered to. There are no channels yet (the event says `channels: none`), and the web
   app shows the task as overdue. A reminder left untouched for an hour logs
   `reminder_ignored`. Telegram and push plug in as "notifiers" in `reminders.js`.
-- **One user, signed cookie.** Google sign-in (or the optional password) sets an HTTP-only
-  cookie signed with a random secret kept in `data/session.key`. Ten wrong passwords lock
-  password sign-in for 15 minutes. Changing
+- **Accounts, signed cookie.** Google sign-in sets an HTTP-only
+  cookie naming the account, signed with a random secret kept in `data/session.key`. Changing
   requests must be JSON and the cookie is `SameSite=Lax`, which blocks cross-site forgery.
 - **Undo is server-side.** Each action returns a one-time token that restores the rows it
   touched. Tokens live in memory, so they do not survive a restart. The original events
@@ -202,9 +210,8 @@ All routes are under `/api`, take and return JSON, and need the session cookie e
 
 | Method & path                      | Body                                              |
 | ---------------------------------- | ------------------------------------------------- |
-| `GET /config`                      | returns `{ google, password }` (no sign-in needed) |
+| `GET /config`                      | returns `{ google }`, the client ID (no sign-in needed) |
 | `POST /login/google`               | `{ credential }` (Google ID token)                |
-| `POST /login`                      | `{ password }` (only if `PLANNER_PASSWORD` is set) |
 | `POST /logout`                     |                                                   |
 | `GET /health`                      |                                                   |
 | `GET /state`                       | returns `{ tasks, events (latest 500), eventCount }` |

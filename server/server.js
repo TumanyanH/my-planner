@@ -9,25 +9,22 @@ const { startReminders } = require('./reminders');
 
 const PORT = Number(process.env.PORT || 8080);
 const HOST = process.env.HOST || '0.0.0.0';
-const PASSWORD = process.env.PLANNER_PASSWORD || '';
 const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
-const ALLOWED_EMAIL = (process.env.ALLOWED_EMAIL || '').trim().toLowerCase();
+// Accounts allowed to sign in with Google: ALLOWED_EMAILS, comma separated (ALLOWED_EMAIL still works).
+const ALLOWED = new Set(`${process.env.ALLOWED_EMAILS || ''},${process.env.ALLOWED_EMAIL || ''}`
+  .split(',').map((e) => e.trim().toLowerCase()).filter(Boolean));
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, '..', 'data'));
 const WEB_DIR = path.join(__dirname, '..', 'web');
 const COOKIE = 'planner_session';
 const SESSION_DAYS = 365;
 
 const GOOGLE = !!GOOGLE_CLIENT_ID;
-if (GOOGLE && !ALLOWED_EMAIL) {
-  console.error('GOOGLE_CLIENT_ID is set but ALLOWED_EMAIL is not. Set ALLOWED_EMAIL to the Google account that may sign in.');
+if (GOOGLE && !ALLOWED.size) {
+  console.error('GOOGLE_CLIENT_ID is set but ALLOWED_EMAILS is not. List the Google accounts that may sign in, comma separated.');
   process.exit(1);
 }
-if (PASSWORD && PASSWORD.length < 8) {
-  console.error('PLANNER_PASSWORD must be at least 8 characters.');
-  process.exit(1);
-}
-if (!GOOGLE && !PASSWORD) {
-  console.error('Set GOOGLE_CLIENT_ID and ALLOWED_EMAIL (Google sign-in) or PLANNER_PASSWORD. See README.md.');
+if (!GOOGLE) {
+  console.error('Set GOOGLE_CLIENT_ID and ALLOWED_EMAILS in .env to enable Google sign-in. See README.md.');
   process.exit(1);
 }
 
@@ -35,9 +32,8 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 const store = openStore(path.join(DATA_DIR, 'planner.db'));
 startReminders(store);
 
-// ---------- auth: one user, Google sign-in (and optionally a password), signed session cookie ----------
-// The signing key is a random secret kept in the data directory, mixed with the password if one
-// is set, so changing the password signs everyone out. Deleting data/session.key does the same.
+// ---------- auth: Google sign-in, signed session cookie ----------
+// The signing key is a random secret kept in the data directory. Deleting data/session.key signs everyone out.
 function loadSecret() {
   const file = path.join(DATA_DIR, 'session.key');
   try { return fs.readFileSync(file, 'utf8').trim(); } catch {}
@@ -45,43 +41,33 @@ function loadSecret() {
   fs.writeFileSync(file, secret, { mode: 0o600 });
   return secret;
 }
-const KEY = createHmac('sha256', loadSecret()).update('planner-session-v1:' + PASSWORD).digest();
+const KEY = createHmac('sha256', loadSecret()).update('planner-session-v1').digest();
 const sign = (v) => createHmac('sha256', KEY).update(v).digest('base64url');
 const sha = (v) => createHash('sha256').update(String(v)).digest();
 const same = (a, b) => timingSafeEqual(sha(a), sha(b));
 
-// Session value: base64url("<expiry ms>:<method>") + "." + signature. method is "google" or "password".
-function newSession(method) {
-  const payload = Buffer.from(`${Date.now() + SESSION_DAYS * 864e5}:${method}`).toString('base64url');
+// Session value: base64url("<expiry ms>:<user id>") + "." + signature.
+function newSession(userId) {
+  const payload = Buffer.from(`${Date.now() + SESSION_DAYS * 864e5}:${userId}`).toString('base64url');
   return `${payload}.${sign(payload)}`;
 }
-function session(req) {
+// The signed-in user, or null. Checked against the database and the allowlist on every request,
+// so removing an email from ALLOWED_EMAILS locks that account out immediately.
+function currentUser(req) {
   const m = new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(req.headers.cookie || '');
   if (!m) return null;
   const [payload, sig] = m[1].split('.');
   if (!payload || !sig || !same(sig, sign(payload))) return null;
-  const [exp, method] = Buffer.from(payload, 'base64url').toString().split(':');
-  return Number(exp) > Date.now() ? { method } : null;
+  const [exp, userId] = Buffer.from(payload, 'base64url').toString().split(':');
+  if (!(Number(exp) > Date.now())) return null;
+  const user = store.getUser(userId);
+  if (!user) return null;
+  return ALLOWED.has(String(user.email).toLowerCase()) ? user : null;
 }
-const authed = (req) => !!session(req);
 function cookie(req, value, maxAge) {
   const https = req.headers['x-forwarded-proto'] === 'https' || process.env.COOKIE_SECURE === '1';
   return `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${https ? '; Secure' : ''}`;
 }
-// Brute-force guard: after 10 wrong passwords, logins are refused for 15 minutes.
-const fails = { n: 0, until: 0 };
-function login(req, res, body) {
-  if (!PASSWORD) throw new HttpError(404, 'Password sign-in is turned off');
-  if (Date.now() < fails.until) throw new HttpError(429, 'Too many attempts. Try again in a few minutes.');
-  if (typeof body.password !== 'string' || !same(body.password, PASSWORD)) {
-    if (++fails.n >= 10) { fails.n = 0; fails.until = Date.now() + 15 * 60e3; }
-    throw new HttpError(401, 'Wrong password');
-  }
-  fails.n = 0;
-  res.setHeader('Set-Cookie', cookie(req, newSession('password'), SESSION_DAYS * 86400));
-  return { ok: true };
-}
-
 // Google sign-in: the browser gets an ID token from Google; we check its signature against
 // Google's published keys, that it was issued for this app, and that it is the allowed account.
 let jwks = { at: 0, keys: [] };
@@ -95,7 +81,6 @@ async function googleKey(kid) {
   return jwk && createPublicKey({ key: jwk, format: 'jwk' });
 }
 async function loginGoogle(req, res, body) {
-  if (!GOOGLE) throw new HttpError(404, 'Google sign-in is not configured');
   const bad = () => new HttpError(401, 'Google sign-in failed');
   const parts = typeof body.credential === 'string' ? body.credential.split('.') : [];
   if (parts.length !== 3) throw bad();
@@ -111,8 +96,9 @@ async function loginGoogle(req, res, body) {
   const okIss = claims.iss === 'https://accounts.google.com' || claims.iss === 'accounts.google.com';
   if (!okIss || claims.aud !== GOOGLE_CLIENT_ID || !(Number(claims.exp) * 1000 > Date.now())) throw bad();
   if (claims.email_verified !== true && claims.email_verified !== 'true') throw bad();
-  if (String(claims.email || '').toLowerCase() !== ALLOWED_EMAIL) throw new HttpError(403, 'This Google account is not allowed');
-  res.setHeader('Set-Cookie', cookie(req, newSession('google'), SESSION_DAYS * 86400));
+  if (!claims.sub || !ALLOWED.has(String(claims.email || '').toLowerCase())) throw new HttpError(403, 'This Google account is not allowed');
+  const user = store.upsertUser({ sub: String(claims.sub), email: claims.email, name: claims.name || null });
+  res.setHeader('Set-Cookie', cookie(req, newSession(user.id), SESSION_DAYS * 86400));
   return { ok: true };
 }
 
@@ -163,7 +149,7 @@ function serveStatic(req, res, pathname) {
 
 // ---------- API ----------
 // Every change answers with the fresh state plus an undo token, so the client needs one round trip.
-const changed = (undo) => ({ state: store.state(), undo: undo || null });
+const changed = (u, undo) => ({ state: store.state(u.id), undo: undo || null });
 const SRC = 'web';
 
 async function api(req, res, route) {
@@ -171,34 +157,34 @@ async function api(req, res, route) {
   if (route === '/health' && m === 'GET') return { ok: true };
 
   const body = ['POST', 'PATCH'].includes(m) ? await readJson(req, route === '/import' ? 8e6 : 1e5) : {};
-  if (route === '/config' && m === 'GET') return { google: GOOGLE ? GOOGLE_CLIENT_ID : null, password: !!PASSWORD };
-  if (route === '/login' && m === 'POST') return login(req, res, body);
+  if (route === '/config' && m === 'GET') return { google: GOOGLE_CLIENT_ID };
   if (route === '/login/google' && m === 'POST') return loginGoogle(req, res, body);
-  if (!authed(req)) throw new HttpError(401, 'Sign in required');
+  const user = currentUser(req);
+  if (!user) throw new HttpError(401, 'Sign in required');
 
   if (route === '/logout' && m === 'POST') { res.setHeader('Set-Cookie', cookie(req, '', 0)); return { ok: true }; }
-  if (route === '/me' && m === 'GET') { const method = session(req).method; return { method, email: method === 'google' ? ALLOWED_EMAIL : null }; }
-  if (route === '/state' && m === 'GET') return store.state();
+  if (route === '/me' && m === 'GET') return { email: user.email, name: user.name };
+  if (route === '/state' && m === 'GET') return store.state(user.id);
   if (route === '/events.json' && m === 'GET') {
     res.setHeader('Content-Disposition', 'attachment; filename="planner-events.json"');
-    return store.allEvents();
+    return store.allEvents(user.id);
   }
-  if (route === '/events' && m === 'DELETE') { store.clearEvents(SRC); return changed(); }
-  if (route === '/import' && m === 'POST') { const n = store.importLocal(body, SRC); return { ...changed(), imported: n }; }
-  if (route === '/tasks' && m === 'POST') return changed(store.create(body, SRC));
+  if (route === '/events' && m === 'DELETE') { store.clearEvents(user.id, SRC); return changed(user); }
+  if (route === '/import' && m === 'POST') { const n = store.importLocal(user.id, body, SRC); return { ...changed(user), imported: n }; }
+  if (route === '/tasks' && m === 'POST') return changed(user, store.create(user.id, body, SRC));
 
   let p;
-  if ((p = /^\/undo\/([\w-]+)$/.exec(route)) && m === 'POST') { store.undo(p[1], SRC); return changed(); }
+  if ((p = /^\/undo\/([\w-]+)$/.exec(route)) && m === 'POST') { store.undo(user.id, p[1], SRC); return changed(user); }
   if ((p = /^\/tasks\/(\w+)$/.exec(route))) {
-    if (m === 'PATCH') return changed(store.update(p[1], body, SRC));
-    if (m === 'DELETE') return changed(store.remove(p[1], SRC));
+    if (m === 'PATCH') return changed(user, store.update(user.id, p[1], body, SRC));
+    if (m === 'DELETE') return changed(user, store.remove(user.id, p[1], SRC));
   }
   if ((p = /^\/tasks\/(\w+)\/(complete|reopen|snooze|reschedule)$/.exec(route)) && m === 'POST') {
     const [, id, action] = p;
-    if (action === 'complete') return changed(store.complete(id, SRC));
-    if (action === 'reopen') return changed(store.reopen(id, SRC));
-    if (action === 'snooze') return changed(store.snooze(id, body.kind, SRC));
-    return changed(store.reschedule(id, body.due, SRC));
+    if (action === 'complete') return changed(user, store.complete(user.id, id, SRC));
+    if (action === 'reopen') return changed(user, store.reopen(user.id, id, SRC));
+    if (action === 'snooze') return changed(user, store.snooze(user.id, id, body.kind, SRC));
+    return changed(user, store.reschedule(user.id, id, body.due, SRC));
   }
   throw new HttpError(404, 'Not found');
 }

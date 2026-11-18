@@ -18,8 +18,18 @@ function openStore(file) {
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 5000;
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      sub TEXT UNIQUE,            -- Google's stable account id ('password' for the optional password login)
+      email TEXT UNIQUE COLLATE NOCASE,
+      name TEXT,
+      created_at TEXT NOT NULL,
+      last_login_at TEXT
+    );
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY,
+      user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
       title TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
       due TEXT,
@@ -36,6 +46,7 @@ function openStore(file) {
     );
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
       at TEXT NOT NULL,
       type TEXT NOT NULL,
       source TEXT NOT NULL,
@@ -45,29 +56,49 @@ function openStore(file) {
       due TEXT,
       data TEXT NOT NULL DEFAULT '{}'
     );
-    CREATE INDEX IF NOT EXISTS events_task ON events(task_id);
+  `);
+  // Databases created before accounts existed have no user_id; add it. Their rows stay unowned
+  // until the first user signs in, who then adopts them (see upsertUser).
+  for (const t of ['tasks', 'events']) {
+    if (!db.prepare(`PRAGMA table_info(${t})`).all().some(c => c.name === 'user_id'))
+      db.exec(`ALTER TABLE ${t} ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CASCADE`);
+  }
+  db.exec(`
+    DROP INDEX IF EXISTS tasks_open_due;
+    CREATE INDEX IF NOT EXISTS tasks_user_status_due ON tasks(user_id, status, due);
     CREATE INDEX IF NOT EXISTS tasks_open_due ON tasks(status, due);
+    CREATE INDEX IF NOT EXISTS events_user ON events(user_id, id);
+    CREATE INDEX IF NOT EXISTS events_task ON events(task_id);
   `);
 
-  const COLS = ['id', 'title', 'notes', 'due', 'importance', 'recur_type', 'recur_every', 'status', 'created_at',
+  const COLS = ['id', 'user_id', 'title', 'notes', 'due', 'importance', 'recur_type', 'recur_every', 'status', 'created_at',
     'completed_at', 'snooze_count', 'reminded_for', 'reminded_at', 'ignored_logged'];
   const q = {
-    get: db.prepare('SELECT * FROM tasks WHERE id = ?'),
-    all: db.prepare('SELECT * FROM tasks'),
+    get: db.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?'),
+    all: db.prepare('SELECT * FROM tasks WHERE user_id = ?'),
     put: db.prepare(`INSERT OR REPLACE INTO tasks (${COLS.join(',')}) VALUES (${COLS.map(() => '?').join(',')})`),
-    del: db.prepare('DELETE FROM tasks WHERE id = ?'),
-    count: db.prepare('SELECT COUNT(*) AS n FROM tasks'),
-    addEvent: db.prepare('INSERT INTO events (at, type, source, task_id, title, importance, due, data) VALUES (?,?,?,?,?,?,?,?)'),
-    recentEvents: db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?'),
-    allEvents: db.prepare('SELECT * FROM events ORDER BY id'),
-    eventCount: db.prepare('SELECT COUNT(*) AS n FROM events'),
-    clearEvents: db.prepare('DELETE FROM events'),
+    del: db.prepare('DELETE FROM tasks WHERE id = ? AND user_id = ?'),
+    count: db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE user_id = ?'),
+    addEvent: db.prepare('INSERT INTO events (user_id, at, type, source, task_id, title, importance, due, data) VALUES (?,?,?,?,?,?,?,?,?)'),
+    recentEvents: db.prepare('SELECT * FROM events WHERE user_id = ? ORDER BY id DESC LIMIT ?'),
+    allEvents: db.prepare('SELECT * FROM events WHERE user_id = ? ORDER BY id'),
+    eventCount: db.prepare('SELECT COUNT(*) AS n FROM events WHERE user_id = ?'),
+    clearEvents: db.prepare('DELETE FROM events WHERE user_id = ?'),
+    userById: db.prepare('SELECT * FROM users WHERE id = ?'),
+    userBySub: db.prepare('SELECT * FROM users WHERE sub = ?'),
+    userByEmail: db.prepare('SELECT * FROM users WHERE email = ?'),
+    userCount: db.prepare('SELECT COUNT(*) AS n FROM users'),
+    addUser: db.prepare('INSERT INTO users (id, sub, email, name, created_at, last_login_at) VALUES (?,?,?,?,?,?)'),
+    touchUser: db.prepare('UPDATE users SET sub = ?, email = ?, name = ?, last_login_at = ? WHERE id = ?'),
+    adoptTasks: db.prepare('UPDATE tasks SET user_id = ? WHERE user_id IS NULL'),
+    adoptEvents: db.prepare('UPDATE events SET user_id = ? WHERE user_id IS NULL'),
     openDue: db.prepare("SELECT * FROM tasks WHERE status = 'open' AND due IS NOT NULL AND due <= ?")
   };
 
   const put = (r) => q.put.run(...COLS.map(c => r[c]));
-  const row = (id) => {
-    const r = q.get.get(id);
+  // Every read and write of a task goes through the owner's id, so one account can never reach another's rows.
+  const row = (userId, id) => {
+    const r = q.get.get(id, userId);
     if (!r) throw new HttpError(404, 'Task not found');
     return r;
   };
@@ -89,26 +120,26 @@ function openStore(file) {
   });
 
   // ---- event log: every interaction, from every channel ----
-  function log(type, source, r, data = {}) {
-    q.addEvent.run(nowIso(), type, source, r?.id ?? null, r?.title ?? null, r?.importance ?? null, r?.due ?? null, JSON.stringify(data));
+  function log(userId, type, source, r, data = {}) {
+    q.addEvent.run(userId, nowIso(), type, source, r?.id ?? null, r?.title ?? null, r?.importance ?? null, r?.due ?? null, JSON.stringify(data));
   }
 
   // ---- undo: remember the rows an action touched, so it can be put back ----
   const undos = new Map();
-  function remember(label, before, created = []) {
+  function remember(userId, label, before, created = []) {
     const token = randomBytes(9).toString('base64url');
-    undos.set(token, { label, before, created });
+    undos.set(token, { userId, label, before, created });
     if (undos.size > 30) undos.delete(undos.keys().next().value);
     return token;
   }
-  function undo(token, source) {
+  function undo(userId, token, source) {
     const u = undos.get(token);
-    if (!u) throw new HttpError(410, 'Nothing to undo');
+    if (!u || u.userId !== userId) throw new HttpError(410, 'Nothing to undo');
     undos.delete(token);
     tx(() => {
-      u.created.forEach(id => q.del.run(id));
+      u.created.forEach(id => q.del.run(id, userId));
       u.before.forEach(put);
-      log('action_undone', source, u.before[0] ?? null, { action: u.label });
+      log(userId, 'action_undone', source, u.before[0] ?? null, { action: u.label });
     });
   }
 
@@ -163,9 +194,9 @@ function openStore(file) {
   }
 
   // ---- task operations ----
-  function insert(f) {
+  function insert(userId, f) {
     const r = {
-      id: uid(), title: f.title, notes: f.notes ?? '', due: f.due ?? null, importance: f.importance ?? 2,
+      id: uid(), user_id: userId, title: f.title, notes: f.notes ?? '', due: f.due ?? null, importance: f.importance ?? 2,
       recur_type: f.recur_type ?? 'none', recur_every: f.recur_every ?? 1, status: 'open', created_at: nowIso(),
       completed_at: null, snooze_count: 0, reminded_for: null, reminded_at: null, ignored_logged: 0
     };
@@ -175,119 +206,120 @@ function openStore(file) {
   const clearReminder = (r) => { r.reminded_for = null; r.reminded_at = null; r.ignored_logged = 0; };
 
   const DEFAULTS = { notes: '', due: null, importance: 2, recur_type: 'none', recur_every: 1 };
-  function create(input, source) {
+  function create(userId, input, source) {
     return tx(() => {
-      const r = insert(clean(input, DEFAULTS));
-      log('task_created', source, r, { recur: r.recur_type });
-      return remember('create', [], [r.id]);
+      const r = insert(userId, clean(input, DEFAULTS));
+      log(userId, 'task_created', source, r, { recur: r.recur_type });
+      return remember(userId, 'create', [], [r.id]);
     });
   }
-  function update(id, input, source) {
+  function update(userId, id, input, source) {
     return tx(() => {
-      const before = row(id), r = clean(input, before);
-      if (r.importance !== before.importance) log('importance_changed', source, r, { from: before.importance, to: r.importance });
+      const before = row(userId, id), r = clean(input, before);
+      if (r.importance !== before.importance) log(userId, 'importance_changed', source, r, { from: before.importance, to: r.importance });
       if (r.due !== before.due) clearReminder(r);
       put(r);
-      log('task_edited', source, r, {
+      log(userId, 'task_edited', source, r, {
         before: { title: before.title, notes: before.notes, due: before.due, importance: before.importance, recur: before.recur_type + before.recur_every }
       });
-      return remember('edit', [before]);
+      return remember(userId, 'edit', [before]);
     });
   }
-  function complete(id, source) {
+  function complete(userId, id, source) {
     return tx(() => {
-      const before = row(id), r = { ...before }, now = new Date();
+      const before = row(userId, id), r = { ...before }, now = new Date();
       if (r.status !== 'open') throw new HttpError(409, 'Task is already done');
-      log('task_completed', source, r, {
+      log(userId, 'task_completed', source, r, {
         minutesVsDue: r.due ? Math.round((now - new Date(r.due)) / 60000) : null, // negative = early, positive = late
         snoozeCount: r.snooze_count, afterReminder: !!r.reminded_at
       });
       const created = [];
       if (r.recur_type !== 'none') {
-        const next = insert({ ...r, due: nextOccurrence(r) });
-        log('task_created', source, next, { recur: next.recur_type, recurringFrom: r.id });
+        const next = insert(userId, { ...r, due: nextOccurrence(r) });
+        log(userId, 'task_created', source, next, { recur: next.recur_type, recurringFrom: r.id });
         created.push(next.id);
       }
       r.status = 'done'; r.completed_at = now.toISOString();
       put(r);
-      return remember('complete', [before], created);
+      return remember(userId, 'complete', [before], created);
     });
   }
-  function reopen(id, source) {
+  function reopen(userId, id, source) {
     return tx(() => {
-      const before = row(id), r = { ...before, status: 'open', completed_at: null };
+      const before = row(userId, id), r = { ...before, status: 'open', completed_at: null };
       put(r);
-      log('task_reopened', source, r);
-      return remember('reopen', [before]);
+      log(userId, 'task_reopened', source, r);
+      return remember(userId, 'reopen', [before]);
     });
   }
-  function snooze(id, kind, source) {
+  function snooze(userId, id, kind, source) {
     if (!['1h', 'tomorrow'].includes(kind)) throw new HttpError(400, 'Unknown snooze kind');
     return tx(() => {
-      const before = row(id), r = { ...before };
+      const before = row(userId, id), r = { ...before };
       r.due = kind === '1h' ? new Date(Date.now() + 3600e3).toISOString() : tomorrowAt(before.due);
       r.snooze_count++; clearReminder(r);
       put(r);
-      log('task_snoozed', source, r, { kind, from: before.due, to: r.due, afterReminder: !!before.reminded_at });
-      return remember('snooze', [before]);
+      log(userId, 'task_snoozed', source, r, { kind, from: before.due, to: r.due, afterReminder: !!before.reminded_at });
+      return remember(userId, 'snooze', [before]);
     });
   }
-  function reschedule(id, due, source) {
+  function reschedule(userId, id, due, source) {
     return tx(() => {
-      const before = row(id), r = { ...before, due: cleanDue(due) };
+      const before = row(userId, id), r = { ...before, due: cleanDue(due) };
       if (!r.due) throw new HttpError(400, 'A new due date is required');
       clearReminder(r);
       put(r);
-      log('task_rescheduled', source, r, { from: before.due, to: r.due, afterReminder: !!before.reminded_at });
-      return remember('reschedule', [before]);
+      log(userId, 'task_rescheduled', source, r, { from: before.due, to: r.due, afterReminder: !!before.reminded_at });
+      return remember(userId, 'reschedule', [before]);
     });
   }
-  function remove(id, source) {
+  function remove(userId, id, source) {
     return tx(() => {
-      const before = row(id);
-      q.del.run(id);
-      log('task_deleted', source, before);
-      return remember('delete', [before]);
+      const before = row(userId, id);
+      q.del.run(id, userId);
+      log(userId, 'task_deleted', source, before);
+      return remember(userId, 'delete', [before]);
     });
   }
 
   // ---- reminders: called on a timer by reminders.js ----
-  // Returns the tasks that just became due so the caller can notify (Telegram/push later).
+  // Covers every user's tasks. Returns the tasks that just became due (each carries its userId)
+  // so the caller can notify the right person (Telegram/push later).
   function collectDue() {
     return tx(() => {
       const now = Date.now(), fresh = [];
       for (const r of q.openDue.all(new Date(now).toISOString())) {
         if (r.reminded_for !== r.due) {
           r.reminded_for = r.due; r.reminded_at = nowIso(); r.ignored_logged = 0;
-          put(r); fresh.push(taskOut(r));
+          put(r); fresh.push({ ...taskOut(r), userId: r.user_id });
         } else if (r.reminded_at && !r.ignored_logged && now - new Date(r.reminded_at) > 3600e3) {
           r.ignored_logged = 1; put(r);
-          log('reminder_ignored', 'system', r, { remindedAt: r.reminded_at });
+          log(r.user_id, 'reminder_ignored', 'system', r, { remindedAt: r.reminded_at });
         }
       }
       return fresh;
     });
   }
   const logReminder = (task, channels) =>
-    log('reminder_due', 'system', task, { channels: channels.join(',') || 'none' });
+    log(task.userId, 'reminder_due', 'system', task, { channels: channels.join(',') || 'none' });
 
   // ---- reads & bulk ----
-  const state = () => ({
-    tasks: q.all.all().map(taskOut),
-    events: q.recentEvents.all(500).map(eventOut),
-    eventCount: q.eventCount.get().n
+  const state = (userId) => ({
+    tasks: q.all.all(userId).map(taskOut),
+    events: q.recentEvents.all(userId, 500).map(eventOut),
+    eventCount: q.eventCount.get(userId).n
   });
-  const allEvents = () => q.allEvents.all().map(eventOut);
-  function clearEvents(source) {
-    tx(() => { q.clearEvents.run(); log('log_cleared', source, null); });
+  const allEvents = (userId) => q.allEvents.all(userId).map(eventOut);
+  function clearEvents(userId, source) {
+    tx(() => { q.clearEvents.run(userId); log(userId, 'log_cleared', source, null); });
   }
   // One-time migration of tasks created while the app was browser-only.
-  function importLocal(data, source) {
+  function importLocal(userId, data, source) {
     return tx(() => {
-      if (q.count.get().n > 0) throw new HttpError(409, 'Server already has tasks');
+      if (q.count.get(userId).n > 0) throw new HttpError(409, 'Server already has tasks');
       const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
       for (const t of tasks) {
-        const r = insert(clean({ title: t.title, notes: t.notes ?? '', due: t.due ?? null, importance: t.importance ?? 2, recur: t.recur ?? { type: 'none', every: 1 } }, DEFAULTS));
+        const r = insert(userId, clean({ title: t.title, notes: t.notes ?? '', due: t.due ?? null, importance: t.importance ?? 2, recur: t.recur ?? { type: 'none', every: 1 } }, DEFAULTS));
         if (t.status === 'done') { r.status = 'done'; r.completed_at = cleanDue(t.completedAt) || nowIso(); }
         r.snooze_count = Number.isInteger(t.snoozeCount) ? t.snoozeCount : 0;
         put(r);
@@ -295,15 +327,39 @@ function openStore(file) {
       for (const e of Array.isArray(data?.events) ? data.events : []) {
         const { id, at, type, taskId, title, importance, due, ...rest } = e;
         if (typeof type !== 'string' || isNaN(new Date(at))) continue;
-        q.addEvent.run(new Date(at).toISOString(), type.slice(0, 60), 'import', null, title ?? null,
+        q.addEvent.run(userId, new Date(at).toISOString(), type.slice(0, 60), 'import', null, title ?? null,
           Number.isInteger(importance) ? importance : null, typeof due === 'string' ? due : null, JSON.stringify(rest));
       }
-      log('data_imported', source, null, { tasks: tasks.length });
+      log(userId, 'data_imported', source, null, { tasks: tasks.length });
       return tasks.length;
     });
   }
 
+  // ---- accounts ----
+  // Find or create the user for a verified sign-in. Matches by the provider's stable id first,
+  // then by email (so an account created from an email can be linked to its Google id later).
+  // The first user ever created adopts any rows from before accounts existed.
+  function upsertUser({ sub, email, name }) {
+    return tx(() => {
+      const now = nowIso();
+      email = email ? String(email).toLowerCase() : null;
+      let u = (sub && q.userBySub.get(sub)) || (email && q.userByEmail.get(email)) || null;
+      if (u) {
+        q.touchUser.run(sub ?? u.sub, email ?? u.email, name ?? u.name, now, u.id);
+      } else {
+        u = { id: uid() };
+        const first = q.userCount.get().n === 0;
+        q.addUser.run(u.id, sub ?? null, email, name ?? null, now, now);
+        if (first) { q.adoptTasks.run(u.id); q.adoptEvents.run(u.id); }
+      }
+      return userOut(q.userById.get(u.id));
+    });
+  }
+  const userOut = (u) => u ? { id: u.id, sub: u.sub, email: u.email, name: u.name } : null;
+  const getUser = (id) => userOut(q.userById.get(id));
+
   return {
+    upsertUser, getUser,
     create, update, complete, reopen, snooze, reschedule, remove, undo,
     collectDue, logReminder, state, allEvents, clearEvents, importLocal,
     close: () => db.close()
