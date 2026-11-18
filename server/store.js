@@ -32,7 +32,9 @@ function openStore(file) {
       user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
       title TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
-      due TEXT,
+      due TEXT,                   -- deadline: when it must be done (drives reminders)
+      planned TEXT,               -- when it happens / is planned to be done; independent of due
+      planned_time INTEGER NOT NULL DEFAULT 0, -- 1 if planned includes a clock time, 0 if date only
       importance INTEGER NOT NULL DEFAULT 2,
       recur_type TEXT NOT NULL DEFAULT 'none',
       recur_every INTEGER NOT NULL DEFAULT 1,
@@ -63,6 +65,9 @@ function openStore(file) {
     if (!db.prepare(`PRAGMA table_info(${t})`).all().some(c => c.name === 'user_id'))
       db.exec(`ALTER TABLE ${t} ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CASCADE`);
   }
+  for (const [col, ddl] of [['planned', 'planned TEXT'], ['planned_time', 'planned_time INTEGER NOT NULL DEFAULT 0']]) {
+    if (!db.prepare('PRAGMA table_info(tasks)').all().some(c => c.name === col)) db.exec(`ALTER TABLE tasks ADD COLUMN ${ddl}`);
+  }
   db.exec(`
     DROP INDEX IF EXISTS tasks_open_due;
     CREATE INDEX IF NOT EXISTS tasks_user_status_due ON tasks(user_id, status, due);
@@ -71,7 +76,7 @@ function openStore(file) {
     CREATE INDEX IF NOT EXISTS events_task ON events(task_id);
   `);
 
-  const COLS = ['id', 'user_id', 'title', 'notes', 'due', 'importance', 'recur_type', 'recur_every', 'status', 'created_at',
+  const COLS = ['id', 'user_id', 'title', 'notes', 'due', 'planned', 'planned_time', 'importance', 'recur_type', 'recur_every', 'status', 'created_at',
     'completed_at', 'snooze_count', 'reminded_for', 'reminded_at', 'ignored_logged'];
   const q = {
     get: db.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?'),
@@ -110,7 +115,7 @@ function openStore(file) {
 
   // ---- shapes sent to clients ----
   const taskOut = (r) => ({
-    id: r.id, title: r.title, notes: r.notes, due: r.due, importance: r.importance,
+    id: r.id, title: r.title, notes: r.notes, due: r.due, planned: r.planned, plannedTime: !!r.planned_time, importance: r.importance,
     recur: { type: r.recur_type, every: r.recur_every }, status: r.status,
     createdAt: r.created_at, completedAt: r.completed_at, snoozeCount: r.snooze_count, remindedAt: r.reminded_at
   });
@@ -152,6 +157,11 @@ function openStore(file) {
     }
     if (input.notes !== undefined) f.notes = String(input.notes ?? '').trim().slice(0, 10000);
     if (input.due !== undefined) f.due = cleanDue(input.due);
+    if (input.planned !== undefined) {
+      f.planned = cleanDue(input.planned, 'planned');
+      if (!f.planned) f.planned_time = 0;
+    }
+    if (input.plannedTime !== undefined) f.planned_time = input.plannedTime && f.planned ? 1 : 0;
     if (input.importance !== undefined) {
       if (![1, 2, 3, 4].includes(input.importance)) throw new HttpError(400, 'Importance must be 1-4');
       f.importance = input.importance;
@@ -163,13 +173,13 @@ function openStore(file) {
       f.recur_type = type; f.recur_every = every;
     }
     if (f.title === undefined) throw new HttpError(400, 'Title is required');
-    if (f.recur_type !== 'none' && !f.due) f.due = nowIso(); // a repeating task needs an anchor date
+    if (f.recur_type !== 'none' && !f.due && !f.planned) f.due = nowIso(); // a repeating task needs an anchor date
     return f;
   }
-  function cleanDue(v) {
+  function cleanDue(v, what = 'due') {
     if (v === null || v === '') return null;
     const d = new Date(v);
-    if (typeof v !== 'string' || isNaN(d)) throw new HttpError(400, 'Invalid due date');
+    if (typeof v !== 'string' || isNaN(d)) throw new HttpError(400, `Invalid ${what} date`);
     return d.toISOString();
   }
 
@@ -180,23 +190,31 @@ function openStore(file) {
     d.setHours(o ? o.getHours() : 9, o ? o.getMinutes() : 0, 0, 0);
     return d.toISOString();
   }
+  // Next occurrence of a repeating task. due and planned (whichever exist) move together by the same
+  // number of repeats; the first of them to be set decides how many are needed to land in the future.
   function nextOccurrence(r) {
-    const d = new Date(r.due || Date.now()), n = Math.max(1, r.recur_every);
-    const step = () => {
+    const n = Math.max(1, r.recur_every);
+    const step = (d) => {
       if (r.recur_type === 'daily') d.setDate(d.getDate() + n);
       else if (r.recur_type === 'weekly') d.setDate(d.getDate() + 7 * n);
       else if (r.recur_type === 'monthly') d.setMonth(d.getMonth() + n);
       else do { d.setDate(d.getDate() + 1); } while ([0, 6].includes(d.getDay()));
     };
-    step();
-    while (d < new Date()) step(); // skip occurrences that are already in the past
-    return d.toISOString();
+    const advance = (iso, k) => { const d = new Date(iso); for (let i = 0; i < k; i++) step(d); return d.toISOString(); };
+    const base = new Date(r.due || r.planned || Date.now());
+    let k = 1; step(base);
+    while (base < new Date()) { step(base); k++; } // skip occurrences that are already in the past
+    return {
+      due: r.due ? advance(r.due, k) : null,
+      planned: r.planned ? advance(r.planned, k) : null
+    };
   }
 
   // ---- task operations ----
   function insert(userId, f) {
     const r = {
-      id: uid(), user_id: userId, title: f.title, notes: f.notes ?? '', due: f.due ?? null, importance: f.importance ?? 2,
+      id: uid(), user_id: userId, title: f.title, notes: f.notes ?? '', due: f.due ?? null,
+      planned: f.planned ?? null, planned_time: f.planned ? (f.planned_time ? 1 : 0) : 0, importance: f.importance ?? 2,
       recur_type: f.recur_type ?? 'none', recur_every: f.recur_every ?? 1, status: 'open', created_at: nowIso(),
       completed_at: null, snooze_count: 0, reminded_for: null, reminded_at: null, ignored_logged: 0
     };
@@ -205,7 +223,7 @@ function openStore(file) {
   }
   const clearReminder = (r) => { r.reminded_for = null; r.reminded_at = null; r.ignored_logged = 0; };
 
-  const DEFAULTS = { notes: '', due: null, importance: 2, recur_type: 'none', recur_every: 1 };
+  const DEFAULTS = { notes: '', due: null, planned: null, planned_time: 0, importance: 2, recur_type: 'none', recur_every: 1 };
   function create(userId, input, source) {
     return tx(() => {
       const r = insert(userId, clean(input, DEFAULTS));
@@ -220,7 +238,7 @@ function openStore(file) {
       if (r.due !== before.due) clearReminder(r);
       put(r);
       log(userId, 'task_edited', source, r, {
-        before: { title: before.title, notes: before.notes, due: before.due, importance: before.importance, recur: before.recur_type + before.recur_every }
+        before: { title: before.title, notes: before.notes, due: before.due, planned: before.planned, importance: before.importance, recur: before.recur_type + before.recur_every }
       });
       return remember(userId, 'edit', [before]);
     });
@@ -235,7 +253,7 @@ function openStore(file) {
       });
       const created = [];
       if (r.recur_type !== 'none') {
-        const next = insert(userId, { ...r, due: nextOccurrence(r) });
+        const next = insert(userId, { ...r, ...nextOccurrence(r) });
         log(userId, 'task_created', source, next, { recur: next.recur_type, recurringFrom: r.id });
         created.push(next.id);
       }
@@ -263,13 +281,17 @@ function openStore(file) {
       return remember(userId, 'snooze', [before]);
     });
   }
-  function reschedule(userId, id, due, source) {
+  // Moves the deadline (default) or the planned date. A planned move keeps whether it has a clock time
+  // unless `plannedTime` is given.
+  function reschedule(userId, id, date, source, which = 'due', plannedTime) {
+    if (!['due', 'planned'].includes(which)) throw new HttpError(400, 'Unknown date to change');
     return tx(() => {
-      const before = row(userId, id), r = { ...before, due: cleanDue(due) };
-      if (!r.due) throw new HttpError(400, 'A new due date is required');
-      clearReminder(r);
+      const before = row(userId, id), r = { ...before }, iso = cleanDue(date, which);
+      if (!iso) throw new HttpError(400, `A new ${which} date is required`);
+      if (which === 'due') { r.due = iso; clearReminder(r); }
+      else { r.planned = iso; if (plannedTime !== undefined) r.planned_time = plannedTime ? 1 : 0; }
       put(r);
-      log(userId, 'task_rescheduled', source, r, { from: before.due, to: r.due, afterReminder: !!before.reminded_at });
+      log(userId, 'task_rescheduled', source, r, { which, from: before[which], to: iso, afterReminder: !!before.reminded_at });
       return remember(userId, 'reschedule', [before]);
     });
   }
@@ -319,7 +341,7 @@ function openStore(file) {
       if (q.count.get(userId).n > 0) throw new HttpError(409, 'Server already has tasks');
       const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
       for (const t of tasks) {
-        const r = insert(userId, clean({ title: t.title, notes: t.notes ?? '', due: t.due ?? null, importance: t.importance ?? 2, recur: t.recur ?? { type: 'none', every: 1 } }, DEFAULTS));
+        const r = insert(userId, clean({ title: t.title, notes: t.notes ?? '', due: t.due ?? null, planned: t.planned ?? null, plannedTime: !!t.plannedTime, importance: t.importance ?? 2, recur: t.recur ?? { type: 'none', every: 1 } }, DEFAULTS));
         if (t.status === 'done') { r.status = 'done'; r.completed_at = cleanDue(t.completedAt) || nowIso(); }
         r.snooze_count = Number.isInteger(t.snoozeCount) ? t.snoozeCount : 0;
         put(r);

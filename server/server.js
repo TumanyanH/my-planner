@@ -184,6 +184,7 @@ async function api(req, res, route) {
     if (action === 'complete') return changed(user, store.complete(user.id, id, SRC));
     if (action === 'reopen') return changed(user, store.reopen(user.id, id, SRC));
     if (action === 'snooze') return changed(user, store.snooze(user.id, id, body.kind, SRC));
+    if (body.planned !== undefined) return changed(user, store.reschedule(user.id, id, body.planned, SRC, 'planned', body.plannedTime));
     return changed(user, store.reschedule(user.id, id, body.due, SRC));
   }
   throw new HttpError(404, 'Not found');
