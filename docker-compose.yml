@@ -1,0 +1,32 @@
+services:
+  planner:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      PORT: "8080"
+    user: "${PUID:-1000}:${PGID:-1000}"   # so files in ./data belong to you, not root
+    volumes:
+      - ./data:/data
+    ports:
+      - "${BIND:-127.0.0.1}:${PORT:-8080}:8080"
+
+  # Started only by `./run.sh https`. Gets and renews a Let's Encrypt certificate for DOMAIN.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${DOMAIN:-localhost} --to planner:8080
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - planner
+
+volumes:
+  caddy_data:
+  caddy_config:

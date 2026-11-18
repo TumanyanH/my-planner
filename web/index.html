@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Planner">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Planner</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <div class="bar">
+    <h1>Planner</h1>
+    <button id="newBtn" class="primary round" aria-label="New task" title="New task">+</button>
+  </div>
+  <input id="search" type="search" placeholder="Search" aria-label="Search tasks" autocomplete="off" enterkeyhint="search">
+</header>
+
+<main>
+  <form id="quick" autocomplete="off">
+    <input id="quickInput" placeholder="Add a task…" aria-label="Quick add task" enterkeyhint="done">
+    <button type="submit" class="primary">Add</button>
+  </form>
+  <p id="quickHint" class="hint">Try “Pay rent <code>tomorrow</code> <code>9am</code> <code>!3</code>” — day, time and importance 1–4 at the end.</p>
+  <section id="list"></section>
+</main>
+
+<nav id="tabs" aria-label="Views"></nav>
+
+<div id="toast" role="status" aria-live="polite" hidden>
+  <span id="toastMsg"></span>
+  <button id="toastUndo" class="small">Undo</button>
+</div>
+
+<dialog id="taskDlg">
+  <form method="dialog" id="taskForm">
+    <h2 id="dlgTitle">New task</h2>
+    <label>Title <input name="title" required autocomplete="off" enterkeyhint="done"></label>
+    <label>Notes <textarea name="notes" rows="3"></textarea></label>
+    <div class="row">
+      <label>Due <input type="datetime-local" name="due"></label>
+      <label>Importance
+        <select name="importance">
+          <option value="1">1 · Low</option>
+          <option value="2" selected>2 · Normal</option>
+          <option value="3">3 · High</option>
+          <option value="4">4 · Critical</option>
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <label>Repeats
+        <select name="recur">
+          <option value="none">Never</option>
+          <option value="daily">Daily</option>
+          <option value="weekdays">Weekdays</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
+      </label>
+      <label id="everyLabel">Every <input type="number" name="every" min="1" value="1" inputmode="numeric"></label>
+    </div>
+    <div class="actions">
+      <button type="button" id="delBtn" class="destructive">Delete</button>
+      <span class="spacer"></span>
+      <button type="button" id="cancelBtn">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="loginDlg">
+  <form id="loginForm">
+    <h2>Sign in</h2>
+    <label>Password <input type="password" name="password" required autocomplete="current-password" enterkeyhint="go"></label>
+    <p id="loginErr" class="error" hidden></p>
+    <div class="actions">
+      <span class="spacer"></span>
+      <button type="submit" class="primary">Sign in</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="reDlg">
+  <form method="dialog" id="reForm">
+    <h2>Reschedule</h2>
+    <label>New due <input type="datetime-local" name="due" required></label>
+    <div class="actions">
+      <span class="spacer"></span>
+      <button type="button" id="reCancel">Cancel</button>
+      <button type="submit" class="primary">Reschedule</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
