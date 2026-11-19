@@ -34,3 +34,10 @@ test('ordinary titles are left alone', () => {
   for (const s of ['Buy 2 pizzas', 'Buy sun cream', 'Read chapter 12', 'tomorrow'])
     assert.deepEqual(p(s), { title: s, planned: null, plannedTime: false, due: null });
 });
+
+test('a time range is removed from the title and starts at the first time', () => {
+  const r = parse('Meeting 3pm-4pm', { now: new Date(2026, 10, 19, 10, 0) });
+  assert.equal(r.title, 'Meeting');
+  assert.equal(new Date(r.planned).getHours(), 15);
+  assert.equal(r.plannedTime, true);
+});

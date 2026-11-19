@@ -18,7 +18,7 @@ let settings = loadSettings();
 let view = settings.startView;
 let query = '';
 let editingId = null;
-let reschedId = null, reschedWhich = 'due';
+let reschedId = null, reschedWhich = 'due', reschedKeepNoTime = false;
 let offline = false;
 
 const $ = (s) => document.querySelector(s);
@@ -319,7 +319,7 @@ function render() {
     const today = open.filter(t => hasDate(t) && !isOverdue(t, now) && place(t, now) <= eod).sort(byDue);
     if (overdue.length) html += `<h3 class="overdue">Overdue · ${overdue.length}</h3>${cards(overdue)}`;
     if (today.length) html += `<h3>Later today</h3>${cards(today)}`;
-    html ||= none || empty('All clear', 'Nothing due today.');
+    html ||= none || empty('All clear', 'Nothing planned or due today.');
   } else if (view === 'upcoming') {
     const groups = new Map();
     open.filter(t => hasDate(t) && !isOverdue(t, now) && place(t, now) > eod).sort(byDue).forEach(t => {
@@ -328,7 +328,7 @@ function render() {
     });
     for (const [k, ts] of groups)
       html += `<h3>${new Date(k).toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })}</h3>${cards(ts)}`;
-    html ||= none || empty('Nothing upcoming', 'Tasks due after today show up here.');
+    html ||= none || empty('Nothing upcoming', 'Tasks planned or due after today show up here.');
   } else if (view === 'all') {
     const dated = open.filter(hasDate).sort(byImportance), undated = open.filter(t => !hasDate(t)).sort(byImportance);
     if (dated.length) html += `<h3>Scheduled</h3>${cards(dated)}`;
@@ -369,6 +369,7 @@ document.addEventListener('click', async (e) => {
   else if (a === 'resched') {
     // A task with only a planned date reschedules that date; otherwise the deadline moves.
     reschedId = t.id; reschedWhich = !t.due && t.planned ? 'planned' : 'due';
+    reschedKeepNoTime = reschedWhich === 'planned' && !t.plannedTime; // a date-only plan stays date-only
     $('#reLabel').firstChild.textContent = reschedWhich === 'planned' ? 'New planned time ' : 'New due ';
     $('#reForm').due.value = toInput(t[reschedWhich] || new Date().toISOString()); $('#reDlg').showModal();
   }
@@ -438,7 +439,7 @@ $('#taskForm').addEventListener('submit', () => {
 $('#reForm').addEventListener('submit', () => {
   const v = $('#reForm').due.value;
   if (reschedId && v) act(`Rescheduled to ${fmt(fromInput(v))}`, 'POST', `/tasks/${reschedId}/reschedule`,
-    reschedWhich === 'planned' ? { planned: fromInput(v), plannedTime: true } : { due: fromInput(v) });
+    reschedWhich === 'planned' ? { planned: fromInput(v), plannedTime: !reschedKeepNoTime } : { due: fromInput(v) });
 });
 
 // Keyboard: "n" quick add, "/" search (when not typing or in a dialog)
