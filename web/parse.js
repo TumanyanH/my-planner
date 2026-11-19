@@ -31,7 +31,7 @@
     // --- times ---
     { re: new RegExp(`${B}${LEAD}(noon|midday|midnight)${END}`, 'i'),
       fn: (m) => ({ kind: 'time', h: /midnight/i.test(m[2]) ? 0 : 12, min: 0 }) },
-    { re: new RegExp(`${B}${LEAD}(\\d{1,2})(?::(\\d{2}))?\\s?(am|pm|a\\.m\\.|p\\.m\\.)${END}`, 'i'),
+    { re: new RegExp(`${B}${LEAD}(\\d{1,2})(?::(\\d{2}))?\\s?(am|pm|a\\.m\\.|p\\.m\\.)(?:\\s?[-\u2013]\\s?\\d{1,2}(?::\\d{2})?\\s?(?:am|pm|a\\.m\\.|p\\.m\\.))?${END}`, 'i'),
       fn: (m) => {
         let h = +m[2]; const min = +(m[3] || 0), pm = /^p/i.test(m[4]);
         if (h < 1 || h > 12 || min > 59) return null;
